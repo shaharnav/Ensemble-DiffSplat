@@ -41,14 +41,15 @@ def dock():
         return jsonify({"error": "Docking failed"}), 500
         
     # 3. Analyze
-    analysis = analyze_docking(pdb_path, docking_result["docked_file"])
+    residue_offset = int(data.get("residue_offset", 0))
+    analysis = analyze_docking(pdb_path, docking_result["docked_file"], residue_offset=residue_offset)
     
     response = {
         "affinity": docking_result["affinity"],
-        "h_bonds": analysis["h_bond_count"] if analysis else 0,
-        "h_bond_details": analysis["details"] if analysis else [],
         "docked_file": docking_result["docked_file"],
-        "stdout": docking_result["stdout"]
+        "h_bond_count": analysis.get("h_bond_count", 0),
+        "metal_bond_count": analysis.get("metal_bond_count", 0),
+        "interaction_details": analysis.get("details", [])
     }
     
     return jsonify(response)

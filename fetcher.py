@@ -4,6 +4,34 @@ import logging
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+from Bio.PDB import PDBParser, PDBIO, Select
+
+class NotWater(Select):
+    """
+    Select class to filter out water residues (hetero flag 'W').
+    """
+    def accept_residue(self, residue):
+        # residue.id is a tuple (hetero_flag, sequence_identifier, insertion_code)
+        # Water residues typically have 'W' as the hetero flag.
+        return residue.id[0] != 'W'
+
+def clean_pdb(pdb_path):
+    """
+    Removes water molecules from a PDB file in-place.
+    """
+    try:
+        parser = PDBParser(QUIET=True)
+        structure = parser.get_structure("structure", pdb_path)
+        
+        io = PDBIO()
+        io.set_structure(structure)
+        io.save(pdb_path, select=NotWater())
+        logging.info(f"Cleaned {pdb_path}: Removed water molecules.")
+        return True
+    except Exception as e:
+        logging.error(f"Error cleaning PDB {pdb_path}: {e}")
+        return False
+
 def fetch_alphafold_structure(uniprot_id, output_dir="./pdbs"):
     """
     Fetches the predicted structure for a given UniProt ID from AlphaFold DB.
@@ -54,6 +82,10 @@ def fetch_alphafold_structure(uniprot_id, output_dir="./pdbs"):
             with open(output_path, "wb") as f:
                 f.write(pdb_response.content)
             logging.info(f"Successfully downloaded to {output_path}")
+            
+            # Clean the PDB (Remove Waters)
+            clean_pdb(output_path)
+            
             return output_path
         else:
             logging.error(f"Failed to download PDB file. Status code: {pdb_response.status_code}")

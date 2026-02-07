@@ -1,0 +1,8 @@
+flask
+flask-cors
+requests
+biopython
+rdkit
+meeko
+numpy
+scipy
