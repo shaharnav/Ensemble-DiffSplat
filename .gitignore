@@ -1,0 +1,20 @@
+# Sensitive data
+.env
+.venv
+venv/
+
+# Large molecular files
+*.pdb
+*.pdbqt
+*.sdf
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS artifacts
+.DS_Store
+
+frontend/node_modules/
+frontend/dist/
