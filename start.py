@@ -13,7 +13,7 @@ from app import app
 def open_browser():
     """Opens the browser after a short delay to allow the server to start."""
     time.sleep(1.5)
-    url = "http://127.0.0.1:5000"
+    url = "http://127.0.0.1:5001"
     print(f"Opening browser at {url}...")
     webbrowser.open(url)
 
@@ -25,4 +25,4 @@ if __name__ == "__main__":
     
     # Run the Flask app
     # debug=False to avoid reloader (which might open browser twice or cause issues in a launcher script)
-    app.run(port=5000, debug=False)
+    app.run(port=5001, debug=False)

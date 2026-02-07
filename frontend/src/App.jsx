@@ -14,7 +14,7 @@ function App() {
         setResult(null);
 
         try {
-            const response = await fetch('http://localhost:5000/api/dock', {
+            const response = await fetch('/api/dock', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
