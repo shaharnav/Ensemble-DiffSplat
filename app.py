@@ -35,7 +35,7 @@ def dock():
     # 2. Run Docking
     # Use standard exhaustiveness for real runs, maybe 8? 
     # For speed in this demo, let's keep it moderate (4).
-    docking_result = run_docking(pdb_path, smiles, output_dir=RESULT_DIR, job_name=job_id, exhaustiveness=4)
+    docking_result = run_docking(pdb_path, smiles, output_dir=RESULT_DIR, job_name=job_id, exhaustiveness=32)
     
     if not docking_result:
         return jsonify({"error": "Docking failed"}), 500

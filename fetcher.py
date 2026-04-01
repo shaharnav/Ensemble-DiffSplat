@@ -11,6 +11,11 @@ class NotWater(Select):
     Select class to filter out water residues (hetero flag 'W').
     """
     def accept_residue(self, residue):
+        # Explicitly keep critical metals
+        resname = residue.get_resname().strip().upper()
+        if resname in ["ZN", "MG", "FE", "MN", "CA", "CO"]:
+            return True
+            
         # residue.id is a tuple (hetero_flag, sequence_identifier, insertion_code)
         # Water residues typically have 'W' as the hetero flag.
         return residue.id[0] != 'W'

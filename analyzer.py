@@ -120,15 +120,15 @@ def analyze_docking(receptor_pdb, docked_pdbqt, residue_offset=0):
                                     # Apply Residue Offset
                                     res_num = rec_res.get_id()[1] + residue_offset
                                     
-                                    # Format residue name: e.g. THR199 (O)
-                                    res_label = f"{rec_res.get_resname()}{res_num}"
+                                    # Format residue name: e.g. ASN253:OD1
+                                    res_label = f"{rec_res.get_resname()}{res_num}:{rec_atom.get_name().strip()}"
                                     
                                     # Check for duplicate interactions (same ligand atom -> same receptor atom)
                                     # We keep them, frontend can filter if needed.
                                     
                                     interaction = {
-                                        "ligand_atom": f"{atom.get_name()} ({element})",
-                                        "receptor_atom": f"{rec_atom.get_name()} ({rec_atom.element})",
+                                        "ligand_atom": atom.get_name().strip(),
+                                        "receptor_atom": rec_atom.get_name().strip(),
                                         "residue": res_label,
                                         "distance": distance,
                                         "type": interaction_type

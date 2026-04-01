@@ -135,7 +135,7 @@ def get_center_and_size(pdb_file):
     
     if metal_coords:
         # TARGETED DOCKING: Center on the Metal (Active Site)
-        logging.info("Found metal ion(s). Using Targeted Docking mode.")
+        logging.info("Metal (ZN) detected - Snapping box to metal center.")
         coords = np.array(metal_coords)
         center = np.mean(coords, axis=0)
         
@@ -144,35 +144,115 @@ def get_center_and_size(pdb_file):
         size = [22.5, 22.5, 22.5]
         return center, size
 
-    # 2. Fallback: pLDDT-weighted Blind Docking
-    high_conf_coords = []
+    logging.info("No metals found - Initializing Cavity Search...")
+
+    # 2. Fallback: Cavity Search
     all_coords = []
+    is_polar = []
     
     for model in structure:
         for atom in model.get_atoms():
-            coords = atom.get_coord()
-            all_coords.append(coords)
-            if atom.get_bfactor() > 70.0:
-                high_conf_coords.append(coords)
-    
-    if high_conf_coords:
-        center_coords = np.array(high_conf_coords)
-    else:
-        if not all_coords:
-             return None, None
-        center_coords = np.array(all_coords)
-
+            all_coords.append(atom.get_coord())
+            element = atom.element.upper() if atom.element else atom.name[0].upper()
+            name = atom.get_name().strip()
+            # 1. Backbone Filter: Exclude N, CA, C, O to prevent distraction by structural core
+            is_backbone = name in ['N', 'CA', 'C', 'O']
+            # 2. Side-Chain Bias: Give 2x weight only to polar side-chain atoms 
+            is_polar.append(1 if (element in ['N', 'O'] and not is_backbone) else 0)
+            
+    if not all_coords:
+        return None, None
+        
     all_coords_np = np.array(all_coords)
-    center = np.mean(center_coords, axis=0)
+    is_polar_np = np.array(is_polar)
     
-    min_coord = np.min(all_coords_np, axis=0)
-    max_coord = np.max(all_coords_np, axis=0)
-    box_size = (max_coord - min_coord) + 10.0
+    # Grid Buffer of 5.0 A
+    min_coord = np.min(all_coords_np, axis=0) - 5.0
+    max_coord = np.max(all_coords_np, axis=0) + 5.0
     
-    # Clamp to max 50.0 Angstroms
-    size = np.minimum(box_size, [50.0, 50.0, 50.0])
+    from scipy.spatial import cKDTree
+    tree = cKDTree(all_coords_np)
     
-    return center, size
+    def calculate_scores(valid_pts, radius=10.0):
+        neighbors = tree.query_ball_point(valid_pts, r=radius)
+        scores = []
+        polar_5a_counts = []
+        
+        # Another query for 5.0 A to check polar proximity
+        neighbors_5a = tree.query_ball_point(valid_pts, r=5.0)
+        
+        for i, n in enumerate(neighbors):
+            # 2x weight for polar side-chain, 1x weight for non-polar/backbone
+            score = len(n) + np.sum(is_polar_np[n]) 
+            scores.append(score)
+            
+            p5 = np.sum(is_polar_np[neighbors_5a[i]])
+            polar_5a_counts.append(p5)
+            
+        final_scores = np.array(scores, dtype=float)
+        # 3. Z-Axis Search: Bias ties toward extracellular top (highest Z)
+        final_scores += valid_pts[:, 2] * 0.5
+        
+        return final_scores, np.array(polar_5a_counts)
+    
+    # Phase 1: Coarse 3.0A search
+    x = np.arange(min_coord[0], max_coord[0], 3.0)
+    y = np.arange(min_coord[1], max_coord[1], 3.0)
+    z = np.arange(min_coord[2], max_coord[2], 3.0)
+    xv, yv, zv = np.meshgrid(x, y, z, indexing='ij')
+    grid_points = np.vstack([xv.ravel(), yv.ravel(), zv.ravel()]).T
+    
+    # Exclude clashing points (within 2.5A of protein)
+    dist, _ = tree.query(grid_points, k=1)
+    valid_points = grid_points[dist > 2.5]
+    
+    if len(valid_points) == 0:
+        # Fallback to geometric center if something weird happens
+        logging.warning("Cavity search failed to find valid points. Using geometric center.")
+        center = np.mean(all_coords_np, axis=0)
+        return center, [25.0, 25.0, 25.0]
+        
+    # Rank by polar-weighted score
+    scores, polar_5a = calculate_scores(valid_points)
+    sorted_indices = np.argsort(scores)[::-1]
+    
+    coarse_best = None
+    for idx in sorted_indices:
+        if polar_5a[idx] > 0:
+            coarse_best = valid_points[idx]
+            break
+            
+    if coarse_best is None:
+        coarse_best = valid_points[sorted_indices[0]]
+    
+    # Phase 2: Refinement 1.0A search around coarse_best (e.g. within a 3.0A radius)
+    rx = np.arange(coarse_best[0] - 3.0, coarse_best[0] + 3.001, 1.0)
+    ry = np.arange(coarse_best[1] - 3.0, coarse_best[1] + 3.001, 1.0)
+    rz = np.arange(coarse_best[2] - 3.0, coarse_best[2] + 3.001, 1.0)
+    rxv, ryv, rzv = np.meshgrid(rx, ry, rz, indexing='ij')
+    refine_points = np.vstack([rxv.ravel(), ryv.ravel(), rzv.ravel()]).T
+    
+    # Exclude clashing points
+    rdist, _ = tree.query(refine_points, k=1)
+    rvalid_points = refine_points[rdist > 2.5]
+    
+    if len(rvalid_points) > 0:
+        rscores, rpolar_5a = calculate_scores(rvalid_points)
+        rsorted_indices = np.argsort(rscores)[::-1]
+        
+        center = None
+        for idx in rsorted_indices:
+            if rpolar_5a[idx] > 0:
+                center = rvalid_points[idx]
+                break
+                
+        if center is None:
+            center = rvalid_points[rsorted_indices[0]]
+    else:
+        center = coarse_best
+        
+    logging.info(f"Cavity search complete. Found deep pocket at [{center[0]:.3f}, {center[1]:.3f}, {center[2]:.3f}]")
+    return center, [25.0, 25.0, 25.0]
 
 def prepare_ligand(smiles, output_pdbqt):
     """

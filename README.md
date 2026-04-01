@@ -9,6 +9,17 @@ A local enzyme-substrate docking simulator with a Swiss-style React frontend and
 - **Analysis**: Calculates binding affinity and detects hydrogen bonds/metal coordination.
 
 ## Usage
-1. Install Python dependencies: `pip install -r requirements.txt` (Create requirements.txt if needed)
-2. Run: `python start.py`
-3. Open `http://localhost:5001`
+1. Create and activate a virtual environment:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
+2. Install Python dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+3. Run the application:
+   ```bash
+   python start.py
+   ```
+4. Open `http://localhost:5001`

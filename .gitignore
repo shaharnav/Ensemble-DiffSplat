@@ -1,7 +1,11 @@
 # Sensitive data
 .env
+
+# Python virtual environments
 .venv
 venv/
+env/
+ENV/
 
 # Large molecular files
 *.pdb

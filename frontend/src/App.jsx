@@ -173,7 +173,7 @@ function App() {
                                                     )}
                                                 </td>
                                                 <td className="px-4 py-2 text-gray-900">{bond.ligand_atom}</td>
-                                                <td className="px-4 py-2 text-gray-900 font-mono">{bond.residue} ({bond.receptor_atom})</td>
+                                                <td className="px-4 py-2 text-gray-900 font-mono">{bond.residue}</td>
                                                 <td className="px-4 py-2 text-gray-900">{bond.distance.toFixed(2)}</td>
                                             </tr>
                                         ))}

@@ -6,3 +6,4 @@ rdkit
 meeko
 numpy
 scipy
+gemmi
