@@ -3,6 +3,7 @@ import React, { useState } from 'react';
 function App() {
     const [uniprotId, setUniprotId] = useState('P00918');
     const [smiles, setSmiles] = useState('CC(=O)NC1=NN=C(S1)S(=O)(=O)N');
+    const [targetResidue, setTargetResidue] = useState("");
     const [residueOffset, setResidueOffset] = useState(0);
     const [loading, setLoading] = useState(false);
     const [result, setResult] = useState(null);
@@ -23,6 +24,7 @@ function App() {
                 body: JSON.stringify({
                     uniprot_id: uniprotId,
                     smiles: smiles,
+                    target_residue: targetResidue,
                     residue_offset: residueOffset
                 }),
             });
@@ -80,6 +82,20 @@ function App() {
                             value={smiles}
                             onChange={(e) => setSmiles(e.target.value)}
                             required
+                        />
+                    </div>
+
+                    <div>
+                        <label htmlFor="targetResidue" className="block text-sm font-medium text-gray-700">
+                            Target Residue (e.g., ZN, ASN253, MET793)
+                        </label>
+                        <input
+                            type="text"
+                            id="targetResidue"
+                            className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-primary focus:border-primary sm:text-sm"
+                            placeholder="e.g. ZN"
+                            value={targetResidue}
+                            onChange={(e) => setTargetResidue(e.target.value)}
                         />
                     </div>
 
@@ -146,6 +162,34 @@ function App() {
                     </div>
 
                     <div className="bg-white p-6 border border-gray-200 shadow-sm rounded-lg sm:col-span-2">
+                        <h3 className="text-lg font-medium text-gray-900 border-b border-gray-100 pb-2 mb-4">Binding Insights</h3>
+                        <div className="mb-6">
+                            <div className="flex justify-between items-center mb-1">
+                                <span className="text-sm font-medium text-gray-700">Hydrophobic Fit</span>
+                                <span className="text-sm font-medium text-gray-700">{result.interaction_summary?.hydrophobic_saturation || 0}%</span>
+                            </div>
+                            <div className="w-full bg-gray-200 rounded-full h-2.5">
+                                <div className="h-2.5 rounded-full" style={{ width: `${Math.min(100, result.interaction_summary?.hydrophobic_saturation || 0)}%`, backgroundColor: '#003262' }}></div>
+                            </div>
+                        </div>
+                        <div className="flex space-x-2">
+                            {result.interaction_summary?.salt_bridge_count > 0 && (
+                                <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-purple-100 text-purple-800">
+                                    Salt Bridge
+                                </span>
+                            )}
+                            {result.interaction_summary?.halogen_bond_count > 0 && (
+                                <span className="inline-flex items-center px-3 py-1 rounded-full text-sm font-medium bg-teal-100 text-teal-800">
+                                    Halogen Bond
+                                </span>
+                            )}
+                            {(!result.interaction_summary?.salt_bridge_count && !result.interaction_summary?.halogen_bond_count) && (
+                                <span className="text-sm text-gray-500 italic">No specific covalent/ionic markers detected.</span>
+                            )}
+                        </div>
+                    </div>
+
+                    <div className="bg-white p-6 border border-gray-200 shadow-sm rounded-lg sm:col-span-2">
                         <h3 className="text-lg font-medium text-gray-900 border-b border-gray-100 pb-2 mb-4">Interaction Details</h3>
                         {result.interaction_details && result.interaction_details.length > 0 ? (
                             <div className="overflow-x-auto">
@@ -162,9 +206,17 @@ function App() {
                                         {result.interaction_details.map((bond, idx) => (
                                             <tr key={idx}>
                                                 <td className="px-4 py-2">
-                                                    {bond.type === "Metal Coordination" ? (
+                                                    {bond.type === "Metal Coordination" || bond.type === "Weak Coordination" ? (
                                                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
                                                             Metal Coord
+                                                        </span>
+                                                    ) : bond.type === "Salt Bridge" ? (
+                                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-purple-100 text-purple-800">
+                                                            {bond.type}
+                                                        </span>
+                                                    ) : bond.type === "Halogen Bond" ? (
+                                                        <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-teal-100 text-teal-800">
+                                                            Halogen Bond
                                                         </span>
                                                     ) : (
                                                         <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-emerald-100 text-emerald-800">

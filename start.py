@@ -26,8 +26,7 @@ def listen_for_close():
             cmd = input("Type 'close' to stop the server and free port 5001: \n")
             if cmd.strip().lower() == "close":
                 print("\nShutting down server...")
-                os.kill(os.getpid(), signal.SIGINT)
-                break
+                os._exit(0)
         except (EOFError, KeyboardInterrupt):
             break
 

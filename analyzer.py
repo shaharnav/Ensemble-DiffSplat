@@ -58,28 +58,39 @@ def analyze_docking(receptor_pdb, docked_pdbqt, residue_offset=0):
         
         # 1. Build KDTree for Receptor Atoms
         receptor_atoms_coords = []
-        receptor_atom_data = [] # Stores (residue object, atom object, is_metal_residue)
+        receptor_atom_data = [] 
         
         for model in receptor:
             for chain in model:
                 for residue in chain:
+                    resname = residue.get_resname().strip().upper()
                     for atom in residue:
-                        # We are interested in polar atoms for H-bonds and metals for coordination
-                        element = atom.element.upper() if atom.element else atom.name[0].upper()
+                        atom_name = atom.get_name().strip().upper()
+                        # Extract element carefully
+                        element = atom.element.upper() if atom.element else "".join(filter(str.isalpha, atom_name))
                         
-                        # H-bond acceptors/donors (approximate): N, O, F, S
-                        # Metals for coordination: ZN, MG, MN, FE, CA, CO
                         is_polar = element in ['N', 'O', 'F', 'S']
-                        is_metal_residue = residue.get_resname().strip().upper() in ["ZN", "MG", "MN", "FE", "CA", "CO"]
+                        is_metal = resname in ["ZN", "MG", "MN", "FE", "CA", "CO"]
+                        is_acidic = resname in ["ASP", "GLU"] and atom_name in ["OD1", "OD2", "OE1", "OE2"]
+                        is_hydrophobic = resname in ["VAL", "LEU", "ILE", "MET", "PHE", "TRP", "ALA"] and element in ["C", "A"]
                         
-                        if is_polar or is_metal_residue:
+                        if is_polar or is_metal or is_acidic or is_hydrophobic:
                             receptor_atoms_coords.append(atom.get_coord())
-                            receptor_atom_data.append((residue, atom, is_metal_residue))
+                            receptor_atom_data.append({
+                                'residue': residue,
+                                'atom': atom,
+                                'is_metal': is_metal,
+                                'is_polar': is_polar,
+                                'is_acidic': is_acidic,
+                                'is_hydrophobic': is_hydrophobic,
+                                'element': element,
+                                'resname': resname
+                            })
                             
         if not receptor_atoms_coords:
             if os.path.exists(temp_ligand_pdb):
                 os.remove(temp_ligand_pdb)
-            return {"h_bond_count": 0, "metal_bond_count": 0, "details": []}
+            return {"h_bond_count": 0, "metal_bond_count": 0, "salt_bridge_count": 0, "halogen_bond_count": 0, "hydrophobic_saturation": 0, "details": []}
             
         receptor_tree = KDTree(receptor_atoms_coords)
         
@@ -87,60 +98,80 @@ def analyze_docking(receptor_pdb, docked_pdbqt, residue_offset=0):
         interactions = []
         h_bond_count = 0
         metal_bond_count = 0
+        salt_bridge_count = 0
+        halogen_bond_count = 0
         
+        unique_ligand_carbons = set()
+        total_ligand_carbons = 0
+
         for model in ligand:
             for chain in model:
                 for residue in chain:
                     for atom in residue:
-                        element = atom.element.upper() if atom.element else atom.name[0].upper()
-                        if element in ['N', 'O', 'F', 'S']: # Ligand atoms that can participate in H-bonds or metal coordination
-                            # Query close receptor atoms
-                            # Search slightly wider than 3.5 to catch potential interactions
-                            indices = receptor_tree.query_ball_point(atom.get_coord(), 3.5)
+                        atom_name = atom.get_name().strip().upper()
+                        element = atom.element.upper() if atom.element else "".join(filter(str.isalpha, atom_name))
+                        
+                        if element in ['C', 'A']:
+                            total_ligand_carbons += 1
                             
-                            for idx in indices:
-                                rec_res, rec_atom, rec_is_metal_residue = receptor_atom_data[idx]
-                                distance = float(np.linalg.norm(atom.get_coord() - rec_atom.get_coord()))
+                        # Search receptor atoms up to 4.0A
+                        indices = receptor_tree.query_ball_point(atom.get_coord(), 4.0)
+                        
+                        for idx in indices:
+                            data = receptor_atom_data[idx]
+                            rec_res = data['residue']
+                            rec_atom = data['atom']
+                            distance = float(np.linalg.norm(atom.get_coord() - rec_atom.get_coord()))
+                            
+                            # HYDROPHOBIC SATURATION
+                            if element in ['C', 'A'] and data['is_hydrophobic']:
+                                if distance < 4.0:
+                                    unique_ligand_carbons.add(id(atom))
+
+                            # Determine interaction type
+                            interaction_type = None
+                            
+                            if element == 'N' and data['is_acidic']:
+                                if distance < 4.0:
+                                    interaction_type = "Salt Bridge"
+                            elif data['is_metal']:
+                                if distance <= 3.2:
+                                    interaction_type = "Metal Coordination"
+                                elif distance <= 3.5:
+                                    interaction_type = "Weak Coordination"
+                            elif element in ['F', 'CL', 'BR', 'I'] and data['element'] in ['N', 'O']:
+                                if distance < 3.5:
+                                    interaction_type = "Halogen Bond"
+                            elif element in ['N', 'O', 'F', 'S'] and data['is_polar']:
+                                if distance < 3.5:
+                                    interaction_type = "Hydrogen Bond"
+
+                            if interaction_type:
+                                res_num = rec_res.get_id()[1] + residue_offset
+                                res_label = f"{data['resname']}{res_num}:{rec_atom.get_name().strip()}"
                                 
-                                # Classification Logic
-                                interaction_type = "Hydrogen Bond"
-                                is_valid = False
+                                interaction = {
+                                    "ligand_atom": atom.get_name().strip(),
+                                    "receptor_atom": rec_atom.get_name().strip(),
+                                    "residue": res_label,
+                                    "distance": distance,
+                                    "type": interaction_type
+                                }
+                                interactions.append(interaction)
                                 
-                                if rec_is_metal_residue:
-                                    # Metal Coordination: typically shorter, strong interaction (< 2.5 A)
-                                    if distance < 2.5: # Strict cutoff per user request
-                                        interaction_type = "Metal Coordination"
-                                        is_valid = True
-                                else:
-                                    # Standard H-Bond
-                                    if distance < 3.5:
-                                        is_valid = True
-                                
-                                if is_valid:
-                                    # Apply Residue Offset
-                                    res_num = rec_res.get_id()[1] + residue_offset
-                                    
-                                    # Format residue name: e.g. ASN253:OD1
-                                    res_label = f"{rec_res.get_resname()}{res_num}:{rec_atom.get_name().strip()}"
-                                    
-                                    # Check for duplicate interactions (same ligand atom -> same receptor atom)
-                                    # We keep them, frontend can filter if needed.
-                                    
-                                    interaction = {
-                                        "ligand_atom": atom.get_name().strip(),
-                                        "receptor_atom": rec_atom.get_name().strip(),
-                                        "residue": res_label,
-                                        "distance": distance,
-                                        "type": interaction_type
-                                    }
-                                    
-                                    interactions.append(interaction)
-                                    
-                                    if interaction_type == "Metal Coordination":
-                                        metal_bond_count += 1
-                                    else:
-                                        h_bond_count += 1
+                                if interaction_type == "Metal Coordination":
+                                    metal_bond_count += 1
+                                elif interaction_type == "Salt Bridge":
+                                    salt_bridge_count += 1
+                                elif interaction_type == "Halogen Bond":
+                                    halogen_bond_count += 1
+                                elif interaction_type == "Hydrogen Bond":
+                                    h_bond_count += 1
         
+        hydrophobic_saturation = 0
+        if total_ligand_carbons > 0:
+            hydrophobic_saturation = (len(unique_ligand_carbons) / total_ligand_carbons) * 100
+
         # Cleanup
         if os.path.exists(temp_ligand_pdb):
             os.remove(temp_ligand_pdb)
@@ -151,6 +182,9 @@ def analyze_docking(receptor_pdb, docked_pdbqt, residue_offset=0):
         return {
             "h_bond_count": h_bond_count,
             "metal_bond_count": metal_bond_count,
+            "salt_bridge_count": salt_bridge_count,
+            "halogen_bond_count": halogen_bond_count,
+            "hydrophobic_saturation": round(hydrophobic_saturation, 1),
             "details": interactions
         }
 
