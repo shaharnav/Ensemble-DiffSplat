@@ -13,8 +13,8 @@ VINA_PATH = os.path.abspath("./bin/vina_1.2.7_mac_aarch64")
 
 def prepare_receptor(pdb_file, output_pdbqt):
     """
-    Prepares a PDB file for docking using RDKit (Hydrogens) and BioPython (Formatting).
-    Bypasses Open Babel to guarantee strict Vina PDBQT column alignments and AD4 atom types.
+    Prepares a PDB file for docking using RDKit (Hydrogens) and BioPython (Formatting)
+    to guarantee strict Vina PDBQT column alignments and AD4 atom types.
     """
     import os
     from rdkit import Chem
@@ -203,7 +203,7 @@ def run_docking(pdb_file, smiles, output_dir="./results", job_name="job", exhaus
     ligand_pdbqt = os.path.join(output_dir, f"{job_name}_ligand.pdbqt")
     output_docked = os.path.join(output_dir, f"{job_name}_out.pdbqt")
     
-    logging.info("Preparing receptor with Open Babel...")
+    logging.info("Preparing receptor with RDKit and BioPython...")
     if not prepare_receptor(pdb_file, receptor_pdbqt):
         return None
 
