@@ -9,12 +9,19 @@ For each SMILES, the ligand is cross-docked against every .pdb receptor.
 The lowest (most negative) affinity across all M conformations is treated
 as the "True Affinity" (induced-fit scoring proxy).
 
+Supports two input modes:
+  1. Classic:  --smiles FILE --receptors DIR
+  2. Payload:  --payload ZIP  (auto-extracts SMILES from SDF, pocket from PDB,
+               and docking box from metadata.json)
+
 Outputs a ranked results.json with per-candidate fields:
   smiles, true_affinity, winning_conformation, h_bond_count
 
 Active-site targeting is delegated entirely to docking_engine.run_docking,
 which applies the catalytic-triad / metal / cavity fallback cascade defined
 in get_center_and_size — guaranteeing Vina never defaults to blind docking.
+When running in payload mode, the explicit pocket center from metadata.json
+is forwarded to the docking engine, bypassing auto-detection.
 """
 
 import argparse
@@ -22,8 +29,10 @@ import glob
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
+import zipfile
 
 from docking_engine import run_docking
 from analyzer import analyze_docking
@@ -51,18 +60,35 @@ def parse_args() -> argparse.Namespace:
         ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+
+    # ── Payload mode (new) ────────────────────────────────────────────────
+    parser.add_argument(
+        "--payload",
+        default=None,
+        metavar="PAYLOAD_ZIP",
+        help=(
+            "Path to an ensemble_payload.zip produced by the DiffSBDD Colab "
+            "notebook.  Contains valid_candidates.sdf, pocket.pdb, "
+            "valid_trajectories/, and metadata.json.  When provided, "
+            "--smiles and --receptors are not required."
+        ),
+    )
+
+    # ── Classic mode ──────────────────────────────────────────────────────
     parser.add_argument(
         "--smiles",
-        required=True,
+        default=None,
         metavar="SMILES_FILE",
         help="Path to a text file containing N SMILES strings, one per line.",
     )
     parser.add_argument(
         "--receptors",
-        required=True,
+        default=None,
         metavar="RECEPTORS_DIR",
         help="Directory containing M ConforMix .pdb receptor conformations.",
     )
+
+    # ── Shared options ────────────────────────────────────────────────────
     parser.add_argument(
         "--output",
         default="results.json",
@@ -85,7 +111,106 @@ def parse_args() -> argparse.Namespace:
             "(e.g. 'ASN253'). Falls back through metal → cavity search if omitted."
         ),
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+
+    # Validate: either --payload OR (--smiles AND --receptors) must be given
+    if args.payload is None and (args.smiles is None or args.receptors is None):
+        parser.error(
+            "Either --payload OR both --smiles and --receptors must be provided."
+        )
+
+    return args
+
+
+# ---------------------------------------------------------------------------
+# Payload unpacking
+# ---------------------------------------------------------------------------
+def unpack_payload(zip_path: str, dest_dir: str) -> dict:
+    """
+    Unzip *zip_path* into *dest_dir* and return a dict with resolved paths
+    and metadata.
+
+    Expected zip layout:
+        metadata.json
+        pocket.pdb
+        valid_candidates.sdf
+        valid_trajectories/
+    """
+    if not os.path.isfile(zip_path):
+        logger.error(f"Payload zip not found: {zip_path}")
+        sys.exit(1)
+
+    logger.info(f"Unpacking payload: {zip_path} → {dest_dir}")
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(dest_dir)
+
+    # ── Read metadata ─────────────────────────────────────────────────────
+    meta_path = os.path.join(dest_dir, "metadata.json")
+    if not os.path.isfile(meta_path):
+        logger.error("metadata.json not found in payload.")
+        sys.exit(1)
+
+    with open(meta_path) as fh:
+        metadata = json.load(fh)
+
+    logger.info(
+        f"  Payload metadata: pdb_id={metadata.get('pdb_id')}, "
+        f"center={metadata.get('pocket_center')}, "
+        f"radius={metadata.get('pocket_radius')}, "
+        f"candidates={metadata.get('n_valid_candidates')}"
+    )
+
+    # ── Locate expected files ─────────────────────────────────────────────
+    pocket_pdb = os.path.join(dest_dir, "pocket.pdb")
+    sdf_path = os.path.join(dest_dir, "valid_candidates.sdf")
+    traj_dir = os.path.join(dest_dir, "valid_trajectories")
+
+    for label, path in [("pocket.pdb", pocket_pdb),
+                        ("valid_candidates.sdf", sdf_path)]:
+        if not os.path.isfile(path):
+            logger.error(f"{label} not found in unpacked payload at {path}")
+            sys.exit(1)
+
+    return {
+        "metadata": metadata,
+        "pocket_pdb": pocket_pdb,
+        "sdf_path": sdf_path,
+        "traj_dir": traj_dir if os.path.isdir(traj_dir) else None,
+    }
+
+
+def extract_smiles_from_sdf(sdf_path: str) -> list[dict]:
+    """
+    Parse every molecule from an SDF file and return a list of dicts, each
+    containing 'smiles' and any SD properties (QED, SA_Score, OriginalIndex).
+
+    Uses RDKit; molecules that fail to parse are skipped with a warning.
+    """
+    from rdkit import Chem
+
+    suppl = Chem.SDMolSupplier(sdf_path)
+    candidates = []
+
+    for idx, mol in enumerate(suppl):
+        if mol is None:
+            logger.warning(f"  Skipping molecule {idx} — RDKit parse failure.")
+            continue
+
+        smiles = Chem.MolToSmiles(mol)
+        if not smiles:
+            logger.warning(f"  Skipping molecule {idx} — empty SMILES.")
+            continue
+
+        entry = {"smiles": smiles}
+
+        # Carry forward SDF properties
+        for prop in mol.GetPropsAsDict():
+            entry[prop] = mol.GetPropsAsDict()[prop]
+
+        candidates.append(entry)
+
+    logger.info(f"  Extracted {len(candidates)} SMILES from {sdf_path}")
+    return candidates
 
 
 # ---------------------------------------------------------------------------
@@ -145,6 +270,8 @@ def dock_one(
     work_dir: str,
     exhaustiveness: int,
     target_residue: str | None,
+    center_coords=None,
+    box_size=None,
 ) -> tuple[float | None, int, str]:
     """
     Dock *smiles* against *pdb_path*.
@@ -161,6 +288,8 @@ def dock_one(
         job_name=job_name,
         exhaustiveness=exhaustiveness,
         target_residue=target_residue,
+        center_coords=center_coords,
+        box_size=box_size,
     )
 
     if result is None or result.get("affinity") is None:
@@ -195,6 +324,8 @@ def run_ensemble(
     work_dir: str,
     exhaustiveness: int,
     target_residue: str | None,
+    center_coords=None,
+    box_size=None,
 ) -> list[dict]:
     """
     Execute the full N×M cross-docking matrix.
@@ -234,6 +365,8 @@ def run_ensemble(
                 work_dir=work_dir,
                 exhaustiveness=exhaustiveness,
                 target_residue=target_residue,
+                center_coords=center_coords,
+                box_size=box_size,
             )
 
             # Keep the most negative (lowest) affinity score — induced-fit winner
@@ -270,49 +403,166 @@ def run_ensemble(
 
 
 # ---------------------------------------------------------------------------
-# Entry point
+# Payload mode orchestrator
 # ---------------------------------------------------------------------------
-def main() -> None:
-    args = parse_args()
+def run_payload_mode(
+    payload_zip: str,
+    output_path: str,
+    exhaustiveness: int,
+    target_residue: str | None,
+) -> None:
+    """
+    End-to-end pipeline: unzip → extract SMILES → dock → rank → save.
+    """
+    # ── 1. Unpack ─────────────────────────────────────────────────────────
+    unpack_dir = os.path.join("results", "payload_unpacked")
+    os.makedirs(unpack_dir, exist_ok=True)
+    payload = unpack_payload(payload_zip, unpack_dir)
 
-    smiles_list = load_smiles(args.smiles)
-    receptor_paths = load_receptors(args.receptors)
+    metadata = payload["metadata"]
+    pocket_pdb = payload["pocket_pdb"]
+    sdf_path = payload["sdf_path"]
 
-    # Intermediate docking artefacts go into a dedicated subdirectory so they
-    # don't pollute the working directory and can be inspected afterwards.
+    # ── 2. Extract SMILES from SDF ────────────────────────────────────────
+    sdf_entries = extract_smiles_from_sdf(sdf_path)
+    if not sdf_entries:
+        logger.error("No valid molecules found in the payload SDF.")
+        sys.exit(1)
+
+    smiles_list = [e["smiles"] for e in sdf_entries]
+
+    # ── 3. Resolve docking box from metadata ──────────────────────────────
+    pocket_center = metadata.get("pocket_center")
+    pocket_radius = metadata.get("pocket_radius", 10.0)
+
+    if pocket_center is not None:
+        center_coords = tuple(pocket_center)
+        # Box size: use 2× radius as the search box dimension (capped at 25Å)
+        box_dim = min(pocket_radius * 2.0, 25.0)
+        box_size = [box_dim, box_dim, box_dim]
+        logger.info(
+            f"Using metadata pocket center {center_coords}, "
+            f"box {box_size} (radius {pocket_radius} Å)"
+        )
+    else:
+        center_coords = None
+        box_size = None
+        logger.warning(
+            "No pocket_center in metadata — falling back to auto-detection."
+        )
+
+    # ── 4. Receptors: single pocket.pdb for now ───────────────────────────
+    receptor_paths = [pocket_pdb]
+    logger.info(f"Receptor: {pocket_pdb}")
+
+    # ── 5. Run the ensemble docking matrix ────────────────────────────────
     work_dir = os.path.join("results", "ensemble_audit")
     os.makedirs(work_dir, exist_ok=True)
-    logger.info(f"Intermediate docking files will be written to '{work_dir}'.")
+    logger.info(f"Intermediate docking files → '{work_dir}'")
 
     ranked = run_ensemble(
         smiles_list=smiles_list,
         receptor_paths=receptor_paths,
         work_dir=work_dir,
-        exhaustiveness=args.exhaustiveness,
-        target_residue=args.target_residue,
+        exhaustiveness=exhaustiveness,
+        target_residue=target_residue,
+        center_coords=center_coords,
+        box_size=box_size,
     )
 
-    # Serialize results
-    output_path = args.output
+    # ── 6. Enrich results with SDF properties (QED, SA) ───────────────────
+    # Build a SMILES→SDF-entry lookup for merging QED/SA scores
+    sdf_lookup = {e["smiles"]: e for e in sdf_entries}
+    for entry in ranked:
+        sdf_data = sdf_lookup.get(entry["smiles"], {})
+        entry["qed"] = sdf_data.get("QED")
+        entry["sa_score"] = sdf_data.get("SA_Score")
+        entry["original_index"] = sdf_data.get("OriginalIndex")
+
+    # ── 7. Save results ───────────────────────────────────────────────────
     with open(output_path, "w") as fh:
         json.dump(ranked, fh, indent=2)
 
     logger.info(f"\n{'='*60}")
-    logger.info(f"Ensemble audit complete. {len(ranked)} candidate(s) ranked.")
+    logger.info(
+        f"Payload audit complete. {len(ranked)} candidate(s) ranked."
+    )
+    logger.info(f"Target: {metadata.get('pdb_id', 'unknown')}")
     logger.info(f"Results saved → {os.path.abspath(output_path)}")
     logger.info(f"{'='*60}\n")
 
-    # Pretty-print top-5 to stdout
+    # Pretty-print top-5
+    _print_rankings(ranked)
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+def main() -> None:
+    args = parse_args()
+
+    if args.payload is not None:
+        # ── Payload mode ──────────────────────────────────────────────────
+        run_payload_mode(
+            payload_zip=args.payload,
+            output_path=args.output,
+            exhaustiveness=args.exhaustiveness,
+            target_residue=args.target_residue,
+        )
+    else:
+        # ── Classic mode ──────────────────────────────────────────────────
+        smiles_list = load_smiles(args.smiles)
+        receptor_paths = load_receptors(args.receptors)
+
+        work_dir = os.path.join("results", "ensemble_audit")
+        os.makedirs(work_dir, exist_ok=True)
+        logger.info(f"Intermediate docking files will be written to '{work_dir}'.")
+
+        ranked = run_ensemble(
+            smiles_list=smiles_list,
+            receptor_paths=receptor_paths,
+            work_dir=work_dir,
+            exhaustiveness=args.exhaustiveness,
+            target_residue=args.target_residue,
+        )
+
+        # Serialize results
+        with open(args.output, "w") as fh:
+            json.dump(ranked, fh, indent=2)
+
+        logger.info(f"\n{'='*60}")
+        logger.info(f"Ensemble audit complete. {len(ranked)} candidate(s) ranked.")
+        logger.info(f"Results saved → {os.path.abspath(args.output)}")
+        logger.info(f"{'='*60}\n")
+
+        _print_rankings(ranked)
+
+
+def _print_rankings(ranked: list[dict]) -> None:
+    """Pretty-print the top-5 ranked candidates to stdout."""
     top = ranked[:5]
     print("\n--- Top candidates by True Affinity ---")
-    print(f"{'Rank':<6} {'Affinity (kcal/mol)':<22} {'H-Bonds':<10} {'Winning Conformation'}")
-    print("-" * 80)
+
+    # Determine which columns to show based on available data
+    has_qed = any(e.get("qed") is not None for e in top)
+
+    header = f"{'Rank':<6} {'Affinity (kcal/mol)':<22} {'H-Bonds':<10} {'Winning Conformation':<25}"
+    if has_qed:
+        header += f" {'QED':<8} {'SA':<8}"
+    print(header)
+    print("-" * len(header))
+
     for rank, entry in enumerate(top, start=1):
         aff = f"{entry['true_affinity']:.2f}" if entry["true_affinity"] is not None else "N/A"
-        print(
+        line = (
             f"{rank:<6} {aff:<22} {entry['h_bond_count']:<10} "
-            f"{entry['winning_conformation']}"
+            f"{entry['winning_conformation']:<25}"
         )
+        if has_qed:
+            qed_str = f"{entry['qed']}" if entry.get("qed") is not None else "N/A"
+            sa_str = f"{entry['sa_score']}" if entry.get("sa_score") is not None else "N/A"
+            line += f" {qed_str:<8} {sa_str:<8}"
+        print(line)
     print()
 
 

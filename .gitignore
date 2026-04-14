@@ -28,5 +28,14 @@ frontend/dist/
 
 # Directories
 bin/
-results/
 pdbs/
+
+# Maintain directory structures for generated outputs and inputs with READMEs
+/ensemble_input/*
+!/ensemble_input/README.md
+
+/results/*
+!/results/README.md
+
+/result_summaries/*
+!/result_summaries/README.md

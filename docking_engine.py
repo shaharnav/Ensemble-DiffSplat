@@ -192,9 +192,14 @@ def prepare_ligand(smiles, output_pdbqt):
         logging.error(f"Error preparing ligand: {e}")
         return False
 
-def run_docking(pdb_file, smiles, output_dir="./results", job_name="job", exhaustiveness=32, target_residue=None):
+def run_docking(pdb_file, smiles, output_dir="./results", job_name="job", exhaustiveness=32, target_residue=None, center_coords=None, box_size=None):
     """
     Runs Vina docking.
+
+    Args:
+        center_coords: Optional explicit (x, y, z) pocket center. If provided
+                       together with box_size, bypasses get_center_and_size().
+        box_size:      Optional explicit [sx, sy, sz] search box dimensions.
     """
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -211,11 +216,16 @@ def run_docking(pdb_file, smiles, output_dir="./results", job_name="job", exhaus
     if not prepare_ligand(smiles, ligand_pdbqt):
         return None
         
-    # Calculate Center/Size (Pass the target residue!)
-    center, size = get_center_and_size(pdb_file, target_residue=target_residue)
-    if center is None:
-        logging.error("Could not calculate center/size.")
-        return None
+    # Use explicit center/size if provided, otherwise auto-detect
+    if center_coords is not None and box_size is not None:
+        center = center_coords
+        size = box_size
+        logging.info(f"Using explicit pocket center: {center}, box: {size}")
+    else:
+        center, size = get_center_and_size(pdb_file, target_residue=target_residue)
+        if center is None:
+            logging.error("Could not calculate center/size.")
+            return None
         
     logging.info(f"Center: {center}, Size: {size}")
 
