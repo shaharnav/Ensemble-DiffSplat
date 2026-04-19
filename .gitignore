@@ -39,3 +39,8 @@ pdbs/
 
 /result_summaries/*
 !/result_summaries/README.md
+
+# Pipeline Outputs & Archives
+results.json
+results.csv
+/archive/

@@ -161,19 +161,22 @@ def unpack_payload(zip_path: str, dest_dir: str) -> dict:
     )
 
     # ── Locate expected files ─────────────────────────────────────────────
-    pocket_pdb = os.path.join(dest_dir, "pocket.pdb")
+    receptors_dir = os.path.join(dest_dir, "ensemble_receptors")
+    if not os.path.isdir(receptors_dir):
+        logger.error("ensemble_receptors/ not found in payload.")
+        sys.exit(1)
+        
     sdf_path = os.path.join(dest_dir, "valid_candidates.sdf")
     traj_dir = os.path.join(dest_dir, "valid_trajectories")
 
-    for label, path in [("pocket.pdb", pocket_pdb),
-                        ("valid_candidates.sdf", sdf_path)]:
+    for label, path in [("valid_candidates.sdf", sdf_path)]:
         if not os.path.isfile(path):
             logger.error(f"{label} not found in unpacked payload at {path}")
             sys.exit(1)
 
     return {
         "metadata": metadata,
-        "pocket_pdb": pocket_pdb,
+        "receptors_dir": receptors_dir,
         "sdf_path": sdf_path,
         "traj_dir": traj_dir if os.path.isdir(traj_dir) else None,
     }
@@ -352,6 +355,8 @@ def run_ensemble(
         best_affinity: float | None = None
         best_h_bonds: int = 0
         best_conformation: str = ""
+        baseline_affinity: float | None = None
+        all_affinities: dict[str, float] = {}
 
         for pdb_path in receptor_paths:
             pdb_basename = os.path.basename(pdb_path)
@@ -371,6 +376,11 @@ def run_ensemble(
 
             # Keep the most negative (lowest) affinity score — induced-fit winner
             if affinity is not None:
+                all_affinities[pdb_basename] = affinity
+                
+                if 'pocket.pdb' in pdb_basename:
+                    baseline_affinity = affinity
+                    
                 if best_affinity is None or affinity < best_affinity:
                     best_affinity = affinity
                     best_h_bonds = h_bonds
@@ -388,6 +398,8 @@ def run_ensemble(
                 "true_affinity": best_affinity,
                 "winning_conformation": best_conformation,
                 "h_bond_count": best_h_bonds,
+                "baseline_affinity": baseline_affinity,
+                "all_affinities": all_affinities,
             }
         )
 
@@ -420,7 +432,7 @@ def run_payload_mode(
     payload = unpack_payload(payload_zip, unpack_dir)
 
     metadata = payload["metadata"]
-    pocket_pdb = payload["pocket_pdb"]
+    receptors_dir = payload["receptors_dir"]
     sdf_path = payload["sdf_path"]
 
     # ── 2. Extract SMILES from SDF ────────────────────────────────────────
@@ -451,9 +463,48 @@ def run_payload_mode(
             "No pocket_center in metadata — falling back to auto-detection."
         )
 
-    # ── 4. Receptors: single pocket.pdb for now ───────────────────────────
-    receptor_paths = [pocket_pdb]
-    logger.info(f"Receptor: {pocket_pdb}")
+    # ── 4. Receptors: dynamically load from ensemble_receptors ───────────────────────────
+    receptor_paths = load_receptors(receptors_dir)
+    logger.info(f"Loaded {len(receptor_paths)} receptor conformations for ensemble docking.")
+
+    # ── 4.5. Align ConforMix variants to Pocket ──────────────────────────────────────────
+    from Bio.PDB import PDBParser, PDBIO, Superimposer
+    pocket_path = os.path.join(receptors_dir, f"{metadata.get('pdb_id')}_pocket.pdb")
+    if not os.path.exists(pocket_path):
+        pocket_path = os.path.join(receptors_dir, "pocket.pdb")
+        
+    if os.path.exists(pocket_path):
+        parser = PDBParser(QUIET=True)
+        try:
+            target_struct = parser.get_structure('t', pocket_path)
+            for rpath in receptor_paths:
+                if 'conformix_var_' in os.path.basename(rpath):
+                    m_struct = parser.get_structure('m', rpath)
+                    t_atoms, m_atoms = [], []
+                    m_map = {}
+                    for model in m_struct:
+                        for chain in model:
+                            for res in chain:
+                                if res.has_id('CA'):
+                                    m_map[(chain.id, res.id[1])] = res['CA']
+                    for model in target_struct:
+                        for chain in model:
+                            for res in chain:
+                                if res.has_id('CA'):
+                                    k = (chain.id, res.id[1])
+                                    if k in m_map:
+                                        t_atoms.append(res['CA'])
+                                        m_atoms.append(m_map[k])
+                    if t_atoms:
+                        sup = Superimposer()
+                        sup.set_atoms(t_atoms, m_atoms)
+                        sup.apply(m_struct.get_atoms())
+                        io = PDBIO()
+                        io.set_structure(m_struct)
+                        io.save(rpath)
+                        logger.info(f"  Aligned {os.path.basename(rpath)} to {os.path.basename(pocket_path)} space ({len(t_atoms)} CA pairs)")
+        except Exception as e:
+            logger.warning(f"  ⚠ Failed to structurally align variants: {e}")
 
     # ── 5. Run the ensemble docking matrix ────────────────────────────────
     work_dir = os.path.join("results", "ensemble_audit")
@@ -477,18 +528,61 @@ def run_payload_mode(
         sdf_data = sdf_lookup.get(entry["smiles"], {})
         entry["qed"] = sdf_data.get("QED")
         entry["sa_score"] = sdf_data.get("SA_Score")
-        entry["original_index"] = sdf_data.get("OriginalIndex")
+        
+        orig_idx = sdf_data.get("OriginalIndex")
+        if orig_idx is not None:
+            entry["id"] = f"Cmpd-{int(orig_idx):04d}"
+        else:
+            entry["id"] = "Cmpd-Unk"
 
     # ── 7. Save results ───────────────────────────────────────────────────
     with open(output_path, "w") as fh:
         json.dump(ranked, fh, indent=2)
+
+    import csv
+    csv_path = output_path.rsplit(".", 1)[0] + ".csv"
+    with open(csv_path, "w", newline="") as fh:
+        writer = csv.writer(fh)
+        receptors = set()
+        for r in ranked:
+            receptors.update(r.get("all_affinities", {}).keys())
+        receptors = sorted(list(receptors))
+        
+        headers = ["ID", "SMILES", "True_Affinity", "Baseline_Affinity", "H_Bonds", "Winning_Conformation", "QED", "SA_Score"] + receptors
+        writer.writerow(headers)
+        
+        for r in ranked:
+            row = [
+                r.get("id", "N/A"),
+                r["smiles"],
+                r.get("true_affinity", ""),
+                r.get("baseline_affinity", ""),
+                r.get("h_bond_count", ""),
+                r.get("winning_conformation", ""),
+                r.get("qed", ""),
+                r.get("sa_score", "")
+            ]
+            for rec in receptors:
+                row.append(r.get("all_affinities", {}).get(rec, ""))
+            writer.writerow(row)
+
+    # ── 8. Archive Payload ────────────────────────────────────────────────
+    import shutil
+    import datetime
+    archive_dir = "archive"
+    os.makedirs(archive_dir, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_path = os.path.join(archive_dir, f"payload_{timestamp}.zip")
+    shutil.move(payload_zip, archive_path)
 
     logger.info(f"\n{'='*60}")
     logger.info(
         f"Payload audit complete. {len(ranked)} candidate(s) ranked."
     )
     logger.info(f"Target: {metadata.get('pdb_id', 'unknown')}")
-    logger.info(f"Results saved → {os.path.abspath(output_path)}")
+    logger.info(f"JSON Results saved → {os.path.abspath(output_path)}")
+    logger.info(f"CSV Matrix saved   → {os.path.abspath(csv_path)}")
+    logger.info(f"Payload ZIP archived to → {os.path.abspath(archive_path)}")
     logger.info(f"{'='*60}\n")
 
     # Pretty-print top-5
@@ -546,7 +640,7 @@ def _print_rankings(ranked: list[dict]) -> None:
     # Determine which columns to show based on available data
     has_qed = any(e.get("qed") is not None for e in top)
 
-    header = f"{'Rank':<6} {'Affinity (kcal/mol)':<22} {'H-Bonds':<10} {'Winning Conformation':<25}"
+    header = f"{'Rank':<6} {'ID':<15} {'Affinity':<10} {'Baseline':<10} {'H-Bonds':<10} {'Winning Conformation':<25}"
     if has_qed:
         header += f" {'QED':<8} {'SA':<8}"
     print(header)
@@ -554,8 +648,10 @@ def _print_rankings(ranked: list[dict]) -> None:
 
     for rank, entry in enumerate(top, start=1):
         aff = f"{entry['true_affinity']:.2f}" if entry["true_affinity"] is not None else "N/A"
+        base_aff = f"{entry.get('baseline_affinity', 0.0):.2f}" if entry.get("baseline_affinity") is not None else "N/A"
+        cmpd_id = entry.get("id", "N/A")
         line = (
-            f"{rank:<6} {aff:<22} {entry['h_bond_count']:<10} "
+            f"{rank:<6} {cmpd_id:<15} {aff:<10} {base_aff:<10} {entry['h_bond_count']:<10} "
             f"{entry['winning_conformation']:<25}"
         )
         if has_qed:

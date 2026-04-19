@@ -229,6 +229,37 @@ def run_docking(pdb_file, smiles, output_dir="./results", job_name="job", exhaus
         
     logging.info(f"Center: {center}, Size: {size}")
 
+    # ── Smart Vina Caching ──
+    if os.path.exists(output_docked) and os.path.getsize(output_docked) > 0:
+        has_affinity = False
+        has_atoms = False
+        cached_affinity = None
+        try:
+            with open(output_docked, 'r') as f:
+                for line in f:
+                    if line.startswith("REMARK VINA RESULT:"):
+                        has_affinity = True
+                        parts = line.split()
+                        if len(parts) >= 4:
+                            cached_affinity = float(parts[3])
+                    elif line.startswith("ATOM") or line.startswith("HETATM") or line.startswith("ENDMDL"):
+                        has_atoms = True
+                        
+                    if has_affinity and has_atoms:
+                        break
+            
+            if has_affinity and has_atoms and cached_affinity is not None:
+                logging.info(f"Using cached Vina output for {job_name} (Affinity: {cached_affinity})")
+                return {
+                    "affinity": cached_affinity,
+                    "docked_file": output_docked,
+                    "stdout": "CACHED - Skipped Vina Subprocess"
+                }
+            else:
+                logging.warning(f"Found corrupted/incomplete PDBQT cache for {job_name}. Re-running Vina.")
+        except Exception as e:
+            logging.warning(f"Error parsing cache for {job_name}: {e}. Re-running Vina.")
+
     # Run Vina
     cmd = [
         VINA_PATH,
