@@ -38,3 +38,8 @@ When computation halts, the original payload safely relocates into the timestamp
   - **Affinity**: The "induced-fit" energy peak achieved against the flexible states.
   - **Baseline**: What that identical drug scored against the rigid immobile crystal default. Use the differential here to prove binding plasticity!
   - **ID**: Look up `Cmpd-0083` strictly within your `results/payload_unpacked/valid_trajectories/` directory. Fetching `mol_0083.xyz` lets you pipe the perfect generated coordinates into your downstream visual render engines linearly with no ambiguity.
+
+### 4. Work in progress features
+Currently working on:
+- 4D Gaussian Splatting Visualization: Using the generated trajectories to create a 4D Gaussian Splatting visualization of the protein-ligand complex, using smooth electron cloud visualizations instead of ball and stick.
+- App visualization: 1 PDB : 1 SMILES, includes more complex active site analysis, including metal bonds, pi-pi stacking, halogen bonding, and other non-covalent interactions on top of h-bonding.
