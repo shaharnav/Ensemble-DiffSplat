@@ -2,6 +2,24 @@
 
 Ensemble-DiffSplat is a high-throughput computational biology pipeline integrating Generative Structure-Based Drug Design (DiffSBDD) with dynamic protein conformational breathing (ConforMix & Boltz). It systematically generates *de novo* ligands and evaluates them against an induced-fit structural ensemble via AutoDock Vina—saving robust cross-docking matrices for dynamic 4D rendering via Gaussian Splatting interfaces.
 
+## Local Environment Setup
+Before executing the auditor locally, you must hydrate the Python environment and download the AutoDock Vina binary solver.
+
+1. **Initialize Virtual Environment & Install Requirements**:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install -r requirements.txt
+   ```
+2. **Download AutoDock Vina Binary**:
+   Ensure you have the correct executable for your architecture mapped locally so the engine can run the solver matrix:
+   ```bash
+   mkdir -p bin
+   # Example: Downloading macOS ARM binary
+   curl -L https://github.com/ccsb-scripps/AutoDock-Vina/releases/download/v1.2.5/vina_1.2.5_mac_catalina_arm64 -o bin/vina_1.2.7_mac_aarch64
+   chmod +x bin/vina_1.2.7_mac_aarch64
+   ```
+
 ## Usage: $M \times N$ Ensemble Pipeline
 
 ### 1. Cloud Generation (Colab)
